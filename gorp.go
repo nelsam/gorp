@@ -118,6 +118,39 @@ type TypeConverter interface {
 	FromDb(target interface{}) (CustomScanner, bool)
 }
 
+// The TypeConverterWithParent interface provides the same thing as
+// TypeConverter, but will have the parent struct passed along as
+// well.
+type TypeConverterWithParent interface {
+	// ToDb is the same as TypeConverter.ToDb, except that it will
+	// also be passed the parent struct.
+	ToDb(parent, val interface{}) (interface{}, error)
+
+	// FromDb is the same as TypeConverter.FromDb, except that it will
+	// also be passed the parent struct.
+	FromDb(parent, target interface{}) (CustomScanner, bool)
+}
+
+func toDb(conv, parent, value interface{}) (interface{}, error) {
+	switch converter := conv.(type) {
+	case TypeConverter:
+		return converter.ToDb(value)
+	case TypeConverterWithParent:
+		return converter.ToDb(parent, value)
+	}
+	return nil, fmt.Errorf("The type converter must be either a TypeConverter or TypeConverterWithParent")
+}
+
+func fromDb(conv, parent, target interface{}) (CustomScanner, bool) {
+	switch converter := conv.(type) {
+	case TypeConverter:
+		return converter.FromDb(target)
+	case TypeConverterWithParent:
+		return converter.FromDb(parent, target)
+	}
+	return CustomScanner{}, false
+}
+
 // CustomScanner binds a database column value to a Go type
 type CustomScanner struct {
 	// After a row is scanned, Holder will contain the value from the database column.
@@ -154,7 +187,8 @@ type DbMap struct {
 	// Dialect implementation to use with this map
 	Dialect Dialect
 
-	TypeConverter TypeConverter
+	// TypeConverter or TypeConverterWithParent to use with this map
+	TypeConverter interface{}
 
 	tables    []*TableMap
 	logger    GorpLogger
@@ -283,7 +317,7 @@ type bindPlan struct {
 	autoIncrFieldName string
 }
 
-func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter) (bindInstance, error) {
+func (plan bindPlan) createBindInstance(elem reflect.Value, conv interface{}) (bindInstance, error) {
 	bi := bindInstance{query: plan.query, autoIncrIdx: plan.autoIncrIdx, autoIncrFieldName: plan.autoIncrFieldName, versField: plan.versField}
 	if plan.versField != "" {
 		bi.existingVersion = elem.FieldByName(plan.versField).Int()
@@ -302,7 +336,7 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter) 
 		} else {
 			val := elem.FieldByName(k).Interface()
 			if conv != nil {
-				val, err = conv.ToDb(val)
+				val, err = toDb(conv, elem.Addr().Interface(), val)
 				if err != nil {
 					return bindInstance{}, err
 				}
@@ -315,7 +349,7 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter) 
 		k := plan.keyFields[i]
 		val := elem.FieldByName(k).Interface()
 		if conv != nil {
-			val, err = conv.ToDb(val)
+			val, err = toDb(conv, elem.Addr().Interface(), val)
 			if err != nil {
 				return bindInstance{}, err
 			}
@@ -746,12 +780,13 @@ func (m *DbMap) readStructColumns(t reflect.Type) (cols []*ColumnMap, version *C
 			}
 			gotype := f.Type
 			if m.TypeConverter != nil {
-				// Make a new pointer to a value of type gotype and
-				// pass it to the TypeConverter's FromDb method to see
-				// if a different type should be used for the column
-				// type during table creation.
-				value := reflect.New(gotype).Interface()
-				scanner, useHolder := m.TypeConverter.FromDb(value)
+				// Pass this field to the TypeConverter's FromDb
+				// method to see if a different type should be used
+				// for the column type during table creation.
+				parentVal := reflect.New(t)
+				parent := parentVal.Interface()
+				value := parentVal.Elem().Field(i).Addr().Interface()
+				scanner, useHolder := fromDb(m.TypeConverter, parent, value)
 				if useHolder {
 					gotype = reflect.TypeOf(scanner.Holder)
 				}
@@ -1620,7 +1655,7 @@ func rawselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 			}
 			target := f.Addr().Interface()
 			if conv != nil {
-				scanner, ok := conv.FromDb(target)
+				scanner, ok := fromDb(conv, v.Interface(), target)
 				if ok {
 					target = scanner.Holder
 					custScan = append(custScan, scanner)
@@ -1834,7 +1869,7 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 		f := v.Elem().FieldByName(fieldName)
 		target := f.Addr().Interface()
 		if conv != nil {
-			scanner, ok := conv.FromDb(target)
+			scanner, ok := fromDb(conv, i, target)
 			if ok {
 				target = scanner.Holder
 				custScan = append(custScan, scanner)
