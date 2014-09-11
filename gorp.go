@@ -1017,6 +1017,16 @@ func (m *DbMap) Get(i interface{}, keys ...interface{}) (interface{}, error) {
 	return get(m, m, i, keys...)
 }
 
+// Load is essentially the same as Get, with the following exception:
+//
+// i must be a non-nil pointer to a value for the struct to load.  If
+// no row is found, the error sql.ErrNoRows will be returned.  You
+// must manually handle this error if you want to handle missing or
+// not found data.
+func (m *DbMap) Load(i interface{}, keys ...interface{}) error {
+	return load(m, m, i, keys...)
+}
+
 // Select runs an arbitrary SQL query, binding the columns in the result
 // to fields on the struct specified by i.  args represent the bind
 // parameters for the SQL statement.
@@ -1206,6 +1216,12 @@ func (t *Transaction) Delete(list ...interface{}) (int64, error) {
 // Get has the same behavior as DbMap.Get(), but runs in a transaction.
 func (t *Transaction) Get(i interface{}, keys ...interface{}) (interface{}, error) {
 	return get(t.dbmap, t, i, keys...)
+}
+
+// Load has the same behavior as DbMap.Load(), but runs in a
+// transaction.
+func (t *Transaction) Load(i interface{}, keys ...interface{}) error {
+	return load(t.dbmap, t, i, keys...)
 }
 
 // Select has the same behavior as DbMap.Select(), but runs in a transaction.
@@ -1817,14 +1833,36 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 		return nil, err
 	}
 
+	v := reflect.New(t).Interface()
+	if err := load(m, exec, v, keys...); err != nil {
+		if err == sql.ErrNoRows {
+			err = nil
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+func load(m *DbMap, exec SqlExecutor, i interface{},
+	keys ...interface{}) error {
+
+	t, err := toType(i)
+	if err != nil {
+		return err
+	}
+
 	table, err := m.TableFor(t, true)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	plan := table.bindGet()
 
-	v := reflect.New(t)
+	v := reflect.ValueOf(i)
+	if v.Kind() != reflect.Ptr || v.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("gorp: A value passed to load must be a non-nil pointer to a struct.")
+	}
+
 	dest := make([]interface{}, len(plan.argFields))
 
 	conv := m.TypeConverter
@@ -1846,27 +1884,24 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 	row := exec.queryRow(plan.query, keys...)
 	err = row.Scan(dest...)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			err = nil
-		}
-		return nil, err
+		return err
 	}
 
 	for _, c := range custScan {
 		err = c.Bind()
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if v, ok := v.Interface().(HasPostGet); ok {
 		err := v.PostGet(exec)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return v.Interface(), nil
+	return nil
 }
 
 func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
