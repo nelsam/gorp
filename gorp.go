@@ -780,12 +780,17 @@ func (m *DbMap) readStructColumns(t reflect.Type) (cols []*ColumnMap, version *C
 			}
 			gotype := f.Type
 			if m.TypeConverter != nil {
-				// Pass this field to the TypeConverter's FromDb
-				// method to see if a different type should be used
-				// for the column type during table creation.
-				parentVal := reflect.New(t)
-				parent := parentVal.Interface()
-				value := parentVal.Elem().Field(i).Addr().Interface()
+				var (
+					parent interface{}
+					value  = reflect.New(gotype).Interface()
+				)
+				if columnName != "-" {
+					// If the column isn't transient, we can fake a
+					// parent and actual field pointer.
+					parentVal := reflect.New(t)
+					parent = parentVal.Interface()
+					value = parentVal.Elem().Field(i).Addr().Interface()
+				}
 				scanner, useHolder := fromDb(m.TypeConverter, parent, value)
 				if useHolder {
 					gotype = reflect.TypeOf(scanner.Holder)
